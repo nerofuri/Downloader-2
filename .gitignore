@@ -1,0 +1,12 @@
+# XcodeGen output (regenerated in CI)
+*.xcodeproj
+*.xcworkspace
+
+# Build artifacts
+build/
+DerivedData/
+Payload/
+*.ipa
+
+# macOS
+.DS_Store
