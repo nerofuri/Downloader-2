@@ -31,10 +31,6 @@ struct DownloadItem: Identifiable, Codable, Equatable {
     var referer: String?
     /// Rolling transfer speed, updated while downloading.
     var bytesPerSecond: Int64?
-    /// For HLS file downloads: segments already written, enabling resume after
-    /// a network drop or app restart.
-    var completedUnits: Int?
-    var tot
 
     init(url: URL, fileName: String, kind: DownloadKind, pageTitle: String? = nil, referer: String? = nil) {
         self.id = UUID()
