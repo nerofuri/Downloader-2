@@ -30,6 +30,9 @@ struct Downloader2App: App {
             RootView()
                 .environmentObject(tabManager)
                 .environmentObject(downloads)
+                .preferredColorScheme(.dark)
+                .tint(Theme.accent)
+                .background(Theme.bg)
         }
     }
 }

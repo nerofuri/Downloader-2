@@ -25,12 +25,14 @@ struct FilesView: View {
                     Text("No files yet. Downloaded files appear here and in the Files app under Downloader 2.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .listRowBackground(Theme.card)
                 }
                 if !files.isEmpty {
                     Section("Downloads folder") {
                         ForEach(files) { file in
                             fileRow(file)
                         }
+                        .listRowBackground(Theme.card)
                     }
                 }
                 if !offlineStreams.isEmpty {
@@ -38,9 +40,11 @@ struct FilesView: View {
                         ForEach(offlineStreams) { item in
                             offlineRow(item)
                         }
+                        .listRowBackground(Theme.card)
                     }
                 }
             }
+            .darkListBackground()
             .navigationTitle("Files")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

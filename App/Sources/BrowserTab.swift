@@ -100,6 +100,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.keyboardDismissMode = .onDrag
+        webView.underPageBackgroundColor = Theme.uiBg
         super.init()
 
         config.userContentController.add(WeakScriptMessageHandler(delegate: self), name: "sniffer")
@@ -166,6 +167,12 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     func stop() { webView.stopLoading() }
     func goBack() { webView.goBack() }
     func goForward() { webView.goForward() }
+
+    /// Returns to the start page without discarding the tab's web content.
+    func goHome() {
+        webView.stopLoading()
+        showingNewTabPage = true
+    }
 
     @objc private func handleRefresh() {
         if webView.url != nil {

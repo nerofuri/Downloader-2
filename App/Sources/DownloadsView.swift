@@ -13,8 +13,10 @@ struct MediaSheet: View {
             List {
                 ForEach(tab.detected) { media in
                     row(media)
+                        .listRowBackground(Theme.card)
                 }
             }
+            .darkListBackground()
             .navigationTitle("Media on this page")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -133,14 +135,17 @@ struct DownloadsView: View {
                 if !active.isEmpty {
                     Section("In progress") {
                         ForEach(active) { item in DownloadRow(item: item, playerURL: $playerURL) }
+                            .listRowBackground(Theme.card)
                     }
                 }
                 if !done.isEmpty {
                     Section("Done") {
                         ForEach(done) { item in DownloadRow(item: item, playerURL: $playerURL) }
+                            .listRowBackground(Theme.card)
                     }
                 }
             }
+            .darkListBackground()
             .navigationTitle("Downloads")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -336,8 +341,10 @@ struct BatchDownloadSheet: View {
                     .font(.system(.footnote, design: .monospaced))
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
+                    .scrollContentBackground(.hidden)
                     .padding(6)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.stroke, lineWidth: 1))
                     .frame(minHeight: 220)
                 Button {
                     downloads.enqueueBatch(text)
@@ -351,6 +358,7 @@ struct BatchDownloadSheet: View {
                 Spacer()
             }
             .padding()
+            .background(Theme.bg)
             .navigationTitle("Batch download")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

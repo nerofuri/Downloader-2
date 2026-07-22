@@ -27,24 +27,32 @@ struct SettingsView: View {
                         SearchEngine.setCurrent(engine)
                     }
                 }
+                .listRowBackground(Theme.card)
+
                 Section("Privacy") {
                     Button(didClear ? "Browsing data cleared ✓" : "Clear browsing data", role: .destructive) {
                         showClearConfirm = true
                     }
                     .disabled(didClear)
                 }
+                .listRowBackground(Theme.card)
+
                 Section("Downloads") {
                     LabeledContent("Location", value: "Files app → On My iPhone → Downloader 2 → Downloads")
                         .font(.footnote)
                 }
+                .listRowBackground(Theme.card)
+
                 Section("About") {
                     LabeledContent("App", value: "Downloader 2")
                     LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")
                     Text("Downloads continue in the background. Only download content you have the right to save — respect copyright and each site's terms of service.")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                 }
+                .listRowBackground(Theme.card)
             }
+            .darkListBackground()
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
