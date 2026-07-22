@@ -7,6 +7,7 @@ enum HLSError: Error, LocalizedError, Equatable {
     case badPlaylist
     case noSegments
     case decryptFailed
+    case httpStatus(Int)
     case unsupportedKey(String)
 
     var errorDescription: String? {
@@ -15,17 +16,24 @@ enum HLSError: Error, LocalizedError, Equatable {
         case .badPlaylist: return "Could not parse the m3u8 playlist"
         case .noSegments: return "The playlist contains no media segments"
         case .decryptFailed: return "Failed to decrypt a media segment"
-        case .unsupportedKey(let method): return "Unsupported encryption: \(method) (DRM streams cannot be downloaded)"
+        case .httpStatus(let code):
+            return code == 403
+                ? "Server refused the request (403). Try starting the download while the video is playing."
+                : "Server error (HTTP \(code))"
+        case .unsupportedKey(let method): return "This stream uses DRM (\(method)) and cannot be downloaded"
         }
     }
 }
 
 /// Downloads an HLS stream and exports it as a single local media file.
-/// Supports master + media playlists, byte-range-free TS/fMP4 segments and AES-128 encryption.
-/// FairPlay/SAMPLE-AES (DRM) streams are rejected.
+/// Sends browser-like headers (User-Agent, Referer, Origin) plus the page's cookies,
+/// downloads segments in parallel with retries, supports byte-range playlists and
+/// AES-128 encryption. FairPlay/SAMPLE-AES (DRM) streams are rejected.
 final class HLSFileDownloader {
     private let sourceURL: URL
     private let outputFileName: String
+    private let referer: String?
+    private let cookies: [HTTPCookie]
     private var cancelled = false
     private var bgTaskID: UIBackgroundTaskIdentifier = .invalid
 
@@ -36,6 +44,7 @@ final class HLSFileDownloader {
         let url: URL
         let key: KeyInfo?
         let sequence: Int
+        let byteRange: (offset: Int64, length: Int64)?
     }
 
     private struct KeyInfo {
@@ -43,9 +52,12 @@ final class HLSFileDownloader {
         let iv: Data? // nil means derive from media sequence number
     }
 
-    init(sourceURL: URL, outputFileName: String) {
+    init(sourceURL: URL, outputFileName: String, referer: String? = nil,
+         cookies: [HTTPCookie] = []) {
         self.sourceURL = sourceURL
         self.outputFileName = outputFileName
+        self.referer = referer
+        self.cookies = cookies
     }
 
     func start() {
@@ -72,17 +84,17 @@ final class HLSFileDownloader {
 
     private func run() async {
         do {
-            let httpSession = Self.makeSession()
+            let session = makeSession()
 
             // 1. Fetch the playlist; if it is a master playlist, follow the best variant.
             var playlistURL = sourceURL
-            var text = try await Self.fetchText(playlistURL, session: httpSession)
+            var text = try await fetchText(playlistURL, session: session)
             if text.contains("#EXT-X-STREAM-INF") {
                 guard let variant = Self.bestVariant(in: text, baseURL: playlistURL) else {
                     throw HLSError.badPlaylist
                 }
                 playlistURL = variant
-                text = try await Self.fetchText(playlistURL, session: httpSession)
+                text = try await fetchText(playlistURL, session: session)
             }
 
             // 2. Parse segments.
@@ -103,30 +115,48 @@ final class HLSFileDownloader {
             var keyCache: [URL: Data] = [:]
 
             if let mapURL {
-                let (data, _) = try await httpSession.data(from: mapURL)
+                let data = try await fetchData(mapURL, session: session)
                 try handle.write(contentsOf: data)
                 written += Int64(data.count)
             }
 
-            // 4. Download, decrypt and append every segment.
-            for (index, segment) in segments.enumerated() {
+            // 4. Download in parallel batches, then decrypt and append in order.
+            let batchSize = 4
+            var index = 0
+            while index < segments.count {
                 if cancelled { throw HLSError.cancelled }
-                var (data, _) = try await httpSession.data(from: segment.url)
-                if let key = segment.key {
-                    let keyData: Data
-                    if let cached = keyCache[key.uri] {
-                        keyData = cached
-                    } else {
-                        let (fetched, _) = try await httpSession.data(from: key.uri)
-                        keyCache[key.uri] = fetched
-                        keyData = fetched
+                let batch = Array(segments[index..<min(index + batchSize, segments.count)])
+                let fetched = try await withThrowingTaskGroup(of: (Int, Data).self,
+                                                              returning: [Int: Data].self) { group in
+                    for (offset, segment) in batch.enumerated() {
+                        group.addTask {
+                            let data = try await self.fetchData(segment.url, session: session,
+                                                                byteRange: segment.byteRange)
+                            return (offset, data)
+                        }
                     }
-                    let iv = key.iv ?? Self.sequenceIV(segment.sequence)
-                    data = try Self.aes128CBCDecrypt(data: data, key: keyData, iv: iv)
+                    var results: [Int: Data] = [:]
+                    for try await (offset, data) in group { results[offset] = data }
+                    return results
                 }
-                try handle.write(contentsOf: data)
-                written += Int64(data.count)
-                onProgress?(Double(index + 1) / Double(segments.count), written)
+                for (offset, segment) in batch.enumerated() {
+                    guard var data = fetched[offset] else { throw HLSError.badPlaylist }
+                    if let key = segment.key {
+                        let keyData: Data
+                        if let cached = keyCache[key.uri] {
+                            keyData = cached
+                        } else {
+                            keyData = try await fetchData(key.uri, session: session)
+                            keyCache[key.uri] = keyData
+                        }
+                        let iv = key.iv ?? Self.sequenceIV(segment.sequence)
+                        data = try Self.aes128CBCDecrypt(data: data, key: keyData, iv: iv)
+                    }
+                    try handle.write(contentsOf: data)
+                    written += Int64(data.count)
+                }
+                index += batch.count
+                onProgress?(Double(index) / Double(segments.count), written)
             }
 
             finish(.success(destination))
@@ -141,18 +171,60 @@ final class HLSFileDownloader {
 
     // MARK: - Networking
 
-    private static func makeSession() -> URLSession {
-        let cfg = URLSessionConfiguration.default
-        cfg.httpAdditionalHeaders = [
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-        ]
+    private func makeSession() -> URLSession {
+        let cfg = URLSessionConfiguration.ephemeral
+        var headers: [String: String] = ["User-Agent": browserUserAgent]
+        if let referer {
+            headers["Referer"] = referer
+            if let refererURL = URL(string: referer), let scheme = refererURL.scheme,
+               let host = refererURL.host {
+                headers["Origin"] = "\(scheme)://\(host)"
+            }
+        }
+        cfg.httpAdditionalHeaders = headers
+        cfg.httpCookieAcceptPolicy = .always
+        cfg.httpShouldSetCookies = true
+        cookies.forEach { cfg.httpCookieStorage?.setCookie($0) }
         cfg.timeoutIntervalForRequest = 30
+        cfg.httpMaximumConnectionsPerHost = 6
         return URLSession(configuration: cfg)
     }
 
-    private static func fetchText(_ url: URL, session: URLSession) async throws -> String {
-        let (data, _) = try await session.data(from: url)
+    /// Fetches a URL with up to 3 attempts and HTTP status validation.
+    private func fetchData(_ url: URL, session: URLSession,
+                           byteRange: (offset: Int64, length: Int64)? = nil) async throws -> Data {
+        var lastError: Error = HLSError.badPlaylist
+        for attempt in 0..<3 {
+            if cancelled { throw HLSError.cancelled }
+            do {
+                var request = URLRequest(url: url)
+                if let byteRange {
+                    let end = byteRange.offset + byteRange.length - 1
+                    request.setValue("bytes=\(byteRange.offset)-\(end)", forHTTPHeaderField: "Range")
+                }
+                let (data, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse {
+                    guard http.statusCode == 200 || http.statusCode == 206 else {
+                        throw HLSError.httpStatus(http.statusCode)
+                    }
+                }
+                return data
+            } catch {
+                lastError = error
+                // 4xx responses won't get better with retries.
+                if case HLSError.httpStatus(let code) = error, code >= 400, code < 500 { throw error }
+                if attempt < 2 {
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                }
+            }
+        }
+        throw lastError
+    }
+
+    private func fetchText(_ url: URL, session: URLSession) async throws -> String {
+        let data = try await fetchData(url, session: session)
         guard let text = String(data: data, encoding: .utf8) else { throw HLSError.badPlaylist }
+        guard text.contains("#EXTM3U") else { throw HLSError.badPlaylist }
         return text
     }
 
@@ -186,6 +258,8 @@ final class HLSFileDownloader {
         var mediaSequence = 0
         var sequence = 0
         var expectSegment = false
+        var pendingRange: (length: Int64, offset: Int64?)?
+        var rangeCursor: [String: Int64] = [:]
 
         for raw in text.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -213,13 +287,28 @@ final class HLSFileDownloader {
                 if let uriString = attribute("URI", in: line) {
                     mapURL = URL(string: uriString, relativeTo: baseURL)?.absoluteURL
                 }
+            } else if line.hasPrefix("#EXT-X-BYTERANGE") {
+                let value = line.components(separatedBy: ":").dropFirst().joined(separator: ":")
+                let parts = value.split(separator: "@")
+                if let length = parts.first.flatMap({ Int64($0) }) {
+                    let offset = parts.count > 1 ? Int64(parts[1]) : nil
+                    pendingRange = (length, offset)
+                }
             } else if line.hasPrefix("#EXTINF") {
                 expectSegment = true
             } else if expectSegment, !line.hasPrefix("#") {
                 if let url = URL(string: line, relativeTo: baseURL)?.absoluteURL {
-                    segments.append(Segment(url: url, key: currentKey, sequence: sequence))
+                    var byteRange: (offset: Int64, length: Int64)?
+                    if let range = pendingRange {
+                        let offset = range.offset ?? rangeCursor[url.absoluteString] ?? 0
+                        byteRange = (offset, range.length)
+                        rangeCursor[url.absoluteString] = offset + range.length
+                    }
+                    segments.append(Segment(url: url, key: currentKey,
+                                            sequence: sequence, byteRange: byteRange))
                     sequence += 1
                 }
+                pendingRange = nil
                 expectSegment = false
             }
         }
@@ -228,15 +317,24 @@ final class HLSFileDownloader {
 
     /// Extracts the value of ATTR=value or ATTR="value" from an m3u8 tag line.
     private static func attribute(_ name: String, in line: String) -> String? {
-        guard let range = line.range(of: name + "=") else { return nil }
-        let rest = line[range.upperBound...]
-        if rest.hasPrefix("\"") {
-            let afterQuote = rest.dropFirst()
-            guard let end = afterQuote.firstIndex(of: "\"") else { return nil }
-            return String(afterQuote[..<end])
+        // Anchor on ",NAME=" or ":NAME=" so e.g. BANDWIDTH doesn't match AVERAGE-BANDWIDTH.
+        var searchRange = line.startIndex..<line.endIndex
+        while let range = line.range(of: name + "=", range: searchRange) {
+            let preceding: Character = range.lowerBound > line.startIndex
+                ? line[line.index(before: range.lowerBound)] : ","
+            if preceding == "," || preceding == ":" {
+                let rest = line[range.upperBound...]
+                if rest.hasPrefix("\"") {
+                    let afterQuote = rest.dropFirst()
+                    guard let end = afterQuote.firstIndex(of: "\"") else { return nil }
+                    return String(afterQuote[..<end])
+                }
+                let end = rest.firstIndex(of: ",") ?? rest.endIndex
+                return String(rest[..<end])
+            }
+            searchRange = range.upperBound..<line.endIndex
         }
-        let end = rest.firstIndex(of: ",") ?? rest.endIndex
-        return String(rest[..<end])
+        return nil
     }
 
     private static func hexData(_ string: String) -> Data? {

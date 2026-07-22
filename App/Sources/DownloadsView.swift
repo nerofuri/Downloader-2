@@ -20,8 +20,11 @@ struct MediaSheet: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Download All") {
-                        for media in tab.detected {
-                            enqueueDefault(media)
+                        let all = tab.detected
+                        tab.currentCookies { cookies in
+                            for media in all {
+                                enqueue(media, cookies: cookies)
+                            }
                         }
                         dismiss()
                     }
@@ -49,48 +52,63 @@ struct MediaSheet: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                Text(media.kind.uppercased())
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.blue.opacity(0.15), in: Capsule())
+                HStack(spacing: 6) {
+                    Text(media.kind.uppercased())
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.blue.opacity(0.15), in: Capsule())
+                    if media.kind == "dash" {
+                        Text("may not be downloadable")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
             }
             Spacer()
+            Button {
+                download(media)
+            } label: {
+                Image(systemName: "arrow.down.circle.fill").font(.title2)
+            }
+            .buttonStyle(.borderless)
             if media.isHLS {
                 Menu {
                     Button {
-                        downloads.enqueueHLSAsset(url: media.url, title: media.pageTitle)
-                        dismiss()
+                        download(media, hlsAsAsset: true)
                     } label: {
-                        Label("Save for offline (recommended)", systemImage: "internaldrive")
-                    }
-                    Button {
-                        downloads.enqueueHLSFile(url: media.url, title: media.pageTitle)
-                        dismiss()
-                    } label: {
-                        Label("Export as video file", systemImage: "doc")
+                        Label("Save for offline playback", systemImage: "internaldrive")
                     }
                 } label: {
-                    Image(systemName: "arrow.down.circle.fill").font(.title2)
-                }
-            } else {
-                Button {
-                    enqueueDefault(media)
-                    dismiss()
-                } label: {
-                    Image(systemName: "arrow.down.circle.fill").font(.title2)
+                    Image(systemName: "ellipsis.circle")
+                        .foregroundStyle(.secondary)
                 }
             }
         }
     }
 
-    private func enqueueDefault(_ media: DetectedMedia) {
+    /// Default action: HLS → single video file, everything else → plain download.
+    private func download(_ media: DetectedMedia, hlsAsAsset: Bool = false) {
+        tab.currentCookies { cookies in
+            if media.isHLS && hlsAsAsset {
+                downloads.enqueueHLSAsset(url: media.url, title: media.pageTitle,
+                                          referer: media.pageURL, cookies: cookies)
+            } else {
+                enqueue(media, cookies: cookies)
+            }
+        }
+        dismiss()
+    }
+
+    private func enqueue(_ media: DetectedMedia, cookies: [HTTPCookie]) {
         if media.isHLS {
-            downloads.enqueueHLSAsset(url: media.url, title: media.pageTitle)
+            downloads.enqueueHLSFile(url: media.url, title: media.pageTitle,
+                                     referer: media.pageURL, cookies: cookies)
         } else {
             downloads.enqueueFile(url: media.url,
                                   fileName: media.url.lastPathComponent,
-                                  pageTitle: media.pageTitle)
+                                  pageTitle: media.pageTitle,
+                                  referer: media.pageURL)
         }
     }
 }
@@ -110,7 +128,7 @@ struct DownloadsView: View {
         NavigationStack {
             List {
                 if active.isEmpty && done.isEmpty {
-                    ContentUnavailableCompat()
+                    EmptyDownloadsView()
                 }
                 if !active.isEmpty {
                     Section("In progress") {
@@ -145,7 +163,7 @@ extension URL: Identifiable {
     public var id: String { absoluteString }
 }
 
-struct ContentUnavailableCompat: View {
+struct EmptyDownloadsView: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "arrow.down.circle")
@@ -188,13 +206,9 @@ struct DownloadRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                if item.receivedBytes > 0 {
-                    Text(item.totalBytes > 0
-                         ? "\(formatBytes(item.receivedBytes)) / \(formatBytes(item.totalBytes))"
-                         : formatBytes(item.receivedBytes))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             if let error = item.errorMessage, item.state == .failed {
                 Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
@@ -242,12 +256,38 @@ struct DownloadRow: View {
     private var statusText: String {
         switch item.state {
         case .queued: return "Queued"
-        case .downloading: return "Downloading \(Int(item.progress * 100))%"
+        case .downloading:
+            if item.kind == .hlsFile || item.kind == .hlsAsset {
+                return "Downloading \(Int(item.progress * 100))%"
+            }
+            return "Downloading \(Int(item.progress * 100))%"
         case .paused: return "Paused"
         case .finished: return item.kind == .hlsAsset ? "Saved for offline playback" : "Finished"
         case .failed: return "Failed"
         case .cancelled: return "Cancelled"
         }
+    }
+
+    /// Right-hand detail: live speed + ETA while downloading, size otherwise.
+    private var detailText: String {
+        if item.state == .downloading, let speed = item.bytesPerSecond, speed > 0 {
+            var text = "\(formatBytes(speed))/s"
+            if item.totalBytes > 0 {
+                let remaining = Double(item.totalBytes - item.receivedBytes) / Double(speed)
+                if remaining.isFinite, remaining > 0, remaining < 360000 {
+                    let mins = Int(remaining) / 60
+                    let secs = Int(remaining) % 60
+                    text += mins > 0 ? " · \(mins)m \(secs)s left" : " · \(secs)s left"
+                }
+            }
+            return text
+        }
+        if item.receivedBytes > 0 {
+            return item.totalBytes > 0 && item.state != .finished
+                ? "\(formatBytes(item.receivedBytes)) / \(formatBytes(item.totalBytes))"
+                : formatBytes(item.receivedBytes)
+        }
+        return ""
     }
 
     @ViewBuilder
@@ -289,7 +329,7 @@ struct BatchDownloadSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Paste one URL per line. Direct file links are downloaded as files; m3u8 links are saved as offline video.")
+                Text("Paste one URL per line. Direct file links are downloaded as files; m3u8 links are downloaded as video files.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 TextEditor(text: $text)

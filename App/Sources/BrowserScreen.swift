@@ -29,28 +29,27 @@ struct BrowserScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             omnibox
-            if tab.isLoading {
-                ProgressView(value: max(tab.progress, 0.05))
-                    .progressViewStyle(.linear)
-                    .tint(.blue)
-                    .frame(height: 2)
-            } else {
-                Color.clear.frame(height: 2)
-            }
+            progressBar
             ZStack(alignment: .bottomTrailing) {
-                if tab.showingNewTabPage {
-                    NewTabPage(tab: tab, omniboxFocused: $omniboxFocused)
-                } else {
-                    WebView(webView: tab.webView)
-                        .ignoresSafeArea(.keyboard)
+                content
+                if omniboxFocused {
+                    // Chrome-style: while editing the address, tapping the page
+                    // dismisses the keyboard instead of interacting with the site.
+                    Color.black.opacity(0.25)
+                        .ignoresSafeArea(edges: .bottom)
+                        .onTapGesture { omniboxFocused = false }
+                        .transition(.opacity)
                 }
-                if !tab.detected.isEmpty {
+                if !tab.detected.isEmpty && !omniboxFocused {
                     mediaBadge
+                        .transition(.scale.combined(with: .opacity))
                 }
                 if let toast {
                     toastView(toast)
                 }
             }
+            .animation(.spring(duration: 0.3), value: tab.detected.count)
+            .animation(.easeInOut(duration: 0.2), value: omniboxFocused)
             bottomToolbar
         }
         .background(Color(.systemBackground))
@@ -60,11 +59,9 @@ struct BrowserScreen: View {
         .sheet(isPresented: $showSettings) { SettingsView() }
         .sheet(isPresented: $showMediaSheet) { MediaSheet(tab: tab) }
         .sheet(isPresented: $showBatchSheet) { BatchDownloadSheet() }
-        .onReceive(tab.$urlString) { value in
-            if !omniboxFocused { omniboxText = value }
-        }
         .onReceive(downloads.$lastMessage) { message in
             guard let message else { return }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
             withAnimation { toast = message }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                 withAnimation { if toast == message { toast = nil } }
@@ -72,7 +69,37 @@ struct BrowserScreen: View {
         }
     }
 
+    @ViewBuilder
+    private var content: some View {
+        if tab.showingNewTabPage {
+            NewTabPage(tab: tab, omniboxFocused: $omniboxFocused)
+        } else {
+            WebView(webView: tab.webView)
+                .ignoresSafeArea(.keyboard)
+        }
+    }
+
+    @ViewBuilder
+    private var progressBar: some View {
+        if tab.isLoading {
+            ProgressView(value: max(tab.progress, 0.05))
+                .progressViewStyle(.linear)
+                .tint(.blue)
+                .frame(height: 2)
+        } else {
+            Color.clear.frame(height: 2)
+        }
+    }
+
     // MARK: - Omnibox (Chrome-style top bar)
+
+    private var displayTitle: String {
+        if tab.showingNewTabPage || tab.urlString.isEmpty { return "Search or type URL" }
+        if let host = URL(string: tab.urlString)?.host {
+            return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        }
+        return tab.urlString
+    }
 
     private var omnibox: some View {
         HStack(spacing: 10) {
@@ -81,21 +108,41 @@ struct BrowserScreen: View {
                       : (tab.urlString.hasPrefix("https") ? "lock.fill" : "magnifyingglass"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                TextField("Search or type URL", text: $omniboxText)
-                    .focused($omniboxFocused)
-                    .keyboardType(.webSearch)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.go)
-                    .onSubmit {
-                        tab.submit(omniboxText)
-                        omniboxFocused = false
+
+                ZStack(alignment: .leading) {
+                    TextField("Search or type URL", text: $omniboxText)
+                        .focused($omniboxFocused)
+                        .keyboardType(.webSearch)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.go)
+                        .onSubmit {
+                            tab.submit(omniboxText)
+                            omniboxFocused = false
+                        }
+                        .opacity(omniboxFocused ? 1 : 0)
+
+                    if !omniboxFocused {
+                        // Compact display (domain only), tap to edit the full URL.
+                        Text(displayTitle)
+                            .lineLimit(1)
+                            .foregroundStyle(tab.showingNewTabPage ? .secondary : .primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                omniboxText = tab.showingNewTabPage ? "" : tab.urlString
+                                omniboxFocused = true
+                            }
                     }
-                if omniboxFocused && !omniboxText.isEmpty {
-                    Button {
-                        omniboxText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+
+                if omniboxFocused {
+                    if !omniboxText.isEmpty {
+                        Button {
+                            omniboxText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
                     }
                 } else if tab.isLoading {
                     Button { tab.stop() } label: {
@@ -108,10 +155,20 @@ struct BrowserScreen: View {
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.vertical, 10)
             .background(Color(.secondarySystemBackground))
             .clipShape(Capsule())
+
+            if omniboxFocused {
+                Button("Cancel") {
+                    omniboxFocused = false
+                    omniboxText = tab.urlString
+                }
+                .font(.subheadline)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
+        .animation(.easeInOut(duration: 0.2), value: omniboxFocused)
         .padding(.horizontal, 12)
         .padding(.top, 6)
         .padding(.bottom, 6)
@@ -123,16 +180,19 @@ struct BrowserScreen: View {
         HStack {
             Button { tab.goBack() } label: {
                 Image(systemName: "chevron.backward").font(.title3)
+                    .frame(width: 44, height: 36)
             }
             .disabled(!tab.canGoBack)
             Spacer()
             Button { tab.goForward() } label: {
                 Image(systemName: "chevron.forward").font(.title3)
+                    .frame(width: 44, height: 36)
             }
             .disabled(!tab.canGoForward)
             Spacer()
             Button { tabManager.newTab() } label: {
                 Image(systemName: "plus").font(.title3)
+                    .frame(width: 44, height: 36)
             }
             Spacer()
             Button { showTabSwitcher = true } label: {
@@ -143,14 +203,15 @@ struct BrowserScreen: View {
                     Text("\(tabManager.tabs.count)")
                         .font(.caption.bold())
                 }
+                .frame(width: 44, height: 36)
             }
             Spacer()
             menuButton
         }
         .foregroundStyle(tab.isIncognito ? Color.purple : Color.primary)
-        .padding(.horizontal, 24)
-        .padding(.vertical, 10)
-        .background(Color(.systemBackground))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(.bar)
         .overlay(Divider(), alignment: .top)
     }
 
@@ -191,7 +252,16 @@ struct BrowserScreen: View {
                 Label("Settings", systemImage: "gearshape")
             }
         } label: {
-            Image(systemName: "ellipsis").font(.title3)
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "ellipsis").font(.title3)
+                    .frame(width: 44, height: 36)
+                if activeDownloadCount > 0 {
+                    Circle()
+                        .fill(.blue)
+                        .frame(width: 9, height: 9)
+                        .offset(x: -6, y: 4)
+                }
+            }
         }
     }
 
@@ -208,7 +278,7 @@ struct BrowserScreen: View {
             .padding(.vertical, 10)
             .background(Color.blue, in: Capsule())
             .foregroundStyle(.white)
-            .shadow(radius: 4)
+            .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
         }
         .padding(.trailing, 16)
         .padding(.bottom, 16)
@@ -218,14 +288,15 @@ struct BrowserScreen: View {
         VStack {
             Spacer()
             Text(message)
-                .font(.footnote)
+                .font(.footnote.weight(.medium))
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(.ultraThinMaterial, in: Capsule())
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
                 .padding(.bottom, 60)
         }
         .frame(maxWidth: .infinity)
-        .transition(.opacity)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
         .allowsHitTesting(false)
     }
 }
@@ -236,21 +307,21 @@ struct NewTabPage: View {
     @ObservedObject var tab: BrowserTab
     var omniboxFocused: FocusState<Bool>.Binding
 
-    private let shortcuts: [(title: String, url: String, icon: String)] = [
-        ("Google", "https://www.google.com", "magnifyingglass"),
-        ("YouTube", "https://www.youtube.com", "play.rectangle.fill"),
-        ("Wikipedia", "https://www.wikipedia.org", "book.fill"),
-        ("Reddit", "https://www.reddit.com", "bubble.left.and.bubble.right.fill"),
-        ("X", "https://x.com", "at"),
-        ("Vimeo", "https://vimeo.com", "video.fill"),
-        ("Archive", "https://archive.org", "building.columns.fill"),
-        ("GitHub", "https://github.com", "chevron.left.forwardslash.chevron.right")
+    private let shortcuts: [(title: String, url: String, icon: String, color: Color)] = [
+        ("Google", "https://www.google.com", "magnifyingglass", .blue),
+        ("YouTube", "https://www.youtube.com", "play.rectangle.fill", .red),
+        ("Wikipedia", "https://www.wikipedia.org", "book.fill", .gray),
+        ("Reddit", "https://www.reddit.com", "bubble.left.and.bubble.right.fill", .orange),
+        ("X", "https://x.com", "at", .primary),
+        ("Vimeo", "https://vimeo.com", "video.fill", .teal),
+        ("Archive", "https://archive.org", "building.columns.fill", .indigo),
+        ("GitHub", "https://github.com", "chevron.left.forwardslash.chevron.right", .purple)
     ]
 
     var body: some View {
         ScrollView {
             VStack(spacing: 28) {
-                Spacer().frame(height: 40)
+                Spacer().frame(height: 36)
                 if tab.isIncognito {
                     VStack(spacing: 8) {
                         Image(systemName: "eyeglasses").font(.largeTitle)
@@ -260,8 +331,19 @@ struct NewTabPage: View {
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    Text("Downloader 2")
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                    VStack(spacing: 10) {
+                        ZStack {
+                            Circle()
+                                .fill(LinearGradient(colors: [.blue, .indigo],
+                                                     startPoint: .top, endPoint: .bottom))
+                                .frame(width: 64, height: 64)
+                            Image(systemName: "arrow.down.to.line")
+                                .font(.title.bold())
+                                .foregroundStyle(.white)
+                        }
+                        Text("Downloader 2")
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                    }
                 }
                 Button {
                     omniboxFocused.wrappedValue = true
@@ -270,6 +352,7 @@ struct NewTabPage: View {
                         Image(systemName: "magnifyingglass")
                         Text("Search or type URL")
                         Spacer()
+                        Image(systemName: "mic.fill").opacity(0.5)
                     }
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
@@ -277,7 +360,7 @@ struct NewTabPage: View {
                     .background(Color(.secondarySystemBackground), in: Capsule())
                 }
                 .padding(.horizontal, 24)
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 20) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 22) {
                     ForEach(shortcuts, id: \.url) { shortcut in
                         Button {
                             if let url = URL(string: shortcut.url) { tab.load(url) }
@@ -285,20 +368,24 @@ struct NewTabPage: View {
                             VStack(spacing: 8) {
                                 Image(systemName: shortcut.icon)
                                     .font(.title3)
-                                    .frame(width: 52, height: 52)
+                                    .foregroundStyle(shortcut.color)
+                                    .frame(width: 54, height: 54)
                                     .background(Color(.secondarySystemBackground), in: Circle())
                                 Text(shortcut.title)
                                     .font(.caption)
+                                    .foregroundStyle(.primary)
                                     .lineLimit(1)
                             }
-                            .foregroundStyle(.primary)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 24)
             }
         }
+        .scrollDismissesKeyboard(.immediately)
         .background(Color(.systemBackground))
+        .onTapGesture { omniboxFocused.wrappedValue = false }
     }
 }
 
@@ -318,6 +405,7 @@ struct TabSwitcherView: View {
                 }
                 .padding()
             }
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("Tabs (\(tabManager.tabs.count))")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -342,38 +430,48 @@ struct TabSwitcherView: View {
             dismiss()
         } label: {
             VStack(alignment: .leading, spacing: 0) {
-                HStack {
+                HStack(spacing: 6) {
                     Image(systemName: tab.isIncognito ? "eyeglasses" : "globe")
                         .font(.caption)
+                        .foregroundStyle(tab.isIncognito ? .purple : .blue)
                     Text(tab.title)
                         .font(.caption.bold())
                         .lineLimit(1)
                     Spacer()
                     Button {
-                        tabManager.close(tab)
+                        withAnimation { tabManager.close(tab) }
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.caption2)
+                            .font(.caption2.bold())
                             .foregroundStyle(.secondary)
+                            .frame(width: 26, height: 26)
+                            .background(Color(.secondarySystemBackground), in: Circle())
                     }
                 }
-                .padding(10)
+                .padding(8)
                 Rectangle()
                     .fill(Color(.secondarySystemBackground))
-                    .frame(height: 110)
+                    .frame(height: 108)
                     .overlay {
-                        Text(tab.urlString.isEmpty ? "New Tab" : tab.urlString)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                            .padding(8)
+                        VStack(spacing: 6) {
+                            Image(systemName: tab.showingNewTabPage ? "plus.square.dashed" : "doc.text.image")
+                                .font(.title2)
+                                .foregroundStyle(.tertiary)
+                            Text(tab.urlString.isEmpty ? "New Tab"
+                                 : (URL(string: tab.urlString)?.host ?? tab.urlString))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .padding(.horizontal, 8)
+                        }
                     }
             }
             .background(Color(.systemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.08), radius: 5, y: 2)
             .overlay {
                 RoundedRectangle(cornerRadius: 14)
-                    .stroke(tab.id == tabManager.activeTabID ? Color.blue : Color(.separator),
+                    .stroke(tab.id == tabManager.activeTabID ? Color.blue : Color(.separator).opacity(0.4),
                             lineWidth: tab.id == tabManager.activeTabID ? 2 : 1)
             }
         }

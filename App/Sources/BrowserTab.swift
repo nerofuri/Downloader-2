@@ -28,7 +28,8 @@ private let snifferScript = """
       window.webkit.messageHandlers.sniffer.postMessage({
         url: abs,
         kind: kindFor(abs),
-        title: document.title || ''
+        title: document.title || '',
+        page: location.href
       });
     } catch (e) {}
   }
@@ -98,12 +99,17 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         config.userContentController.addUserScript(script)
         webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
+        webView.scrollView.keyboardDismissMode = .onDrag
         super.init()
 
         config.userContentController.add(WeakScriptMessageHandler(delegate: self), name: "sniffer")
         webView.navigationDelegate = self
         webView.uiDelegate = self
         AdBlocker.shared.apply(to: webView)
+
+        let refresh = UIRefreshControl()
+        refresh.addTarget(self, action: #selector(handleRefresh), for: .valueChanged)
+        webView.scrollView.refreshControl = refresh
 
         observations = [
             webView.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
@@ -161,6 +167,21 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     func goBack() { webView.goBack() }
     func goForward() { webView.goForward() }
 
+    @objc private func handleRefresh() {
+        if webView.url != nil {
+            webView.reload()
+        } else {
+            webView.scrollView.refreshControl?.endRefreshing()
+        }
+    }
+
+    /// Cookies of this tab's data store (incognito tabs have their own ephemeral store).
+    func currentCookies(_ completion: @escaping ([HTTPCookie]) -> Void) {
+        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+            DispatchQueue.main.async { completion(cookies) }
+        }
+    }
+
     func setDesktopMode(_ enabled: Bool) {
         desktopMode = enabled
         webView.customUserAgent = enabled ? desktopUA : nil
@@ -196,6 +217,19 @@ extension BrowserTab: WKNavigationDelegate {
             self.detected.removeAll()
             self.showingNewTabPage = false
         }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        webView.scrollView.refreshControl?.endRefreshing()
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        webView.scrollView.refreshControl?.endRefreshing()
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        webView.scrollView.refreshControl?.endRefreshing()
     }
 
     func webView(_ webView: WKWebView,
@@ -252,7 +286,8 @@ extension BrowserTab: WKScriptMessageHandler {
               let url = URL(string: urlString) else { return }
         let kind = body["kind"] as? String ?? "video"
         let pageTitle = (body["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? title
-        let media = DetectedMedia(url: url, kind: kind, pageTitle: pageTitle)
+        let pageURL = body["page"] as? String ?? webView.url?.absoluteString
+        let media = DetectedMedia(url: url, kind: kind, pageTitle: pageTitle, pageURL: pageURL)
         DispatchQueue.main.async {
             if !self.detected.contains(media) {
                 self.detected.append(media)

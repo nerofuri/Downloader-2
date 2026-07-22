@@ -1,6 +1,9 @@
 import Foundation
 import AVFoundation
 import UIKit
+import WebKit
+
+let browserUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
 final class DownloadManager: NSObject, ObservableObject {
     static let shared = DownloadManager()
@@ -17,6 +20,9 @@ final class DownloadManager: NSObject, ObservableObject {
     private var assetTasks: [UUID: AVAssetDownloadTask] = [:]
     private var resumeData: [UUID: Data] = [:]
     private var hlsWorkers: [UUID: HLSFileDownloader] = [:]
+    private var cookiesByItem: [UUID: [HTTPCookie]] = [:]
+    /// Per-item throttle so progress callbacks don't re-render the UI dozens of times per second.
+    private var progressMeta: [UUID: (lastPublish: Date, lastBytes: Int64)] = [:]
     private var lastProgressSave = Date.distantPast
 
     private var storeURL: URL {
@@ -51,37 +57,47 @@ final class DownloadManager: NSObject, ObservableObject {
 
     // MARK: - Public API
 
-    func enqueueFile(url: URL, fileName: String? = nil, pageTitle: String? = nil) {
+    func enqueueFile(url: URL, fileName: String? = nil, pageTitle: String? = nil,
+                     referer: String? = nil) {
         let name = sanitizedFileName(fileName ?? url.lastPathComponent,
                                      fallback: "file-\(Int(Date().timeIntervalSince1970))")
-        var item = DownloadItem(url: url, fileName: name, kind: .file, pageTitle: pageTitle)
+        var item = DownloadItem(url: url, fileName: name, kind: .file,
+                                pageTitle: pageTitle, referer: referer)
         item.state = .downloading
         appendAndSave(item)
         startFileTask(for: item, resumeData: nil)
         notify("Download started: \(name)")
     }
 
-    func enqueueHLSFile(url: URL, title: String? = nil) {
+    /// Downloads an HLS stream into a single local video file (default for m3u8).
+    func enqueueHLSFile(url: URL, title: String? = nil, referer: String? = nil,
+                        cookies: [HTTPCookie] = []) {
         let base = sanitizedFileName(title ?? url.deletingPathExtension().lastPathComponent,
                                      fallback: "stream-\(Int(Date().timeIntervalSince1970))")
-        var item = DownloadItem(url: url, fileName: base + ".ts", kind: .hlsFile, pageTitle: title)
+        var item = DownloadItem(url: url, fileName: base + ".ts", kind: .hlsFile,
+                                pageTitle: title, referer: referer)
         item.state = .downloading
+        cookiesByItem[item.id] = cookies
         appendAndSave(item)
         startHLSFileWorker(for: item)
-        notify("Stream download started: \(base)")
+        notify("Video download started: \(base)")
     }
 
-    func enqueueHLSAsset(url: URL, title: String? = nil) {
+    /// Saves an HLS stream with the system downloader for offline in-app playback.
+    func enqueueHLSAsset(url: URL, title: String? = nil, referer: String? = nil,
+                         cookies: [HTTPCookie] = []) {
         let base = sanitizedFileName(title ?? url.deletingPathExtension().lastPathComponent,
                                      fallback: "stream-\(Int(Date().timeIntervalSince1970))")
-        var item = DownloadItem(url: url, fileName: base, kind: .hlsAsset, pageTitle: title)
+        var item = DownloadItem(url: url, fileName: base, kind: .hlsAsset,
+                                pageTitle: title, referer: referer)
         item.state = .downloading
+        cookiesByItem[item.id] = cookies
         appendAndSave(item)
         startAssetTask(for: item)
         notify("Offline save started: \(base)")
     }
 
-    /// Batch download: one URL per line. m3u8 URLs are saved for offline playback,
+    /// Batch download: one URL per line. m3u8 URLs become video-file downloads,
     /// everything else is downloaded as a plain file.
     func enqueueBatch(_ text: String) {
         let lines = text.split(whereSeparator: \.isNewline)
@@ -93,7 +109,7 @@ final class DownloadManager: NSObject, ObservableObject {
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https" else { continue }
             if url.path.lowercased().hasSuffix(".m3u8") {
-                enqueueHLSAsset(url: url)
+                enqueueHLSFile(url: url)
             } else {
                 enqueueFile(url: url)
             }
@@ -109,20 +125,22 @@ final class DownloadManager: NSObject, ObservableObject {
                 task.cancel { [weak self] data in
                     DispatchQueue.main.async {
                         if let data { self?.resumeData[item.id] = data }
-                        self?.update(item.id) { $0.state = .paused }
+                        self?.update(item.id) { $0.state = .paused; $0.bytesPerSecond = nil }
                     }
                 }
                 tasks[item.id] = nil
             } else {
-                update(item.id) { $0.state = .paused }
+                update(item.id) { $0.state = .paused; $0.bytesPerSecond = nil }
             }
         case .hlsFile:
             hlsWorkers[item.id]?.cancel()
             hlsWorkers[item.id] = nil
-            update(item.id) { $0.state = .paused; $0.progress = 0; $0.receivedBytes = 0 }
+            update(item.id) {
+                $0.state = .paused; $0.progress = 0; $0.receivedBytes = 0; $0.bytesPerSecond = nil
+            }
         case .hlsAsset:
             assetTasks[item.id]?.suspend()
-            update(item.id) { $0.state = .paused }
+            update(item.id) { $0.state = .paused; $0.bytesPerSecond = nil }
         }
     }
 
@@ -153,7 +171,7 @@ final class DownloadManager: NSObject, ObservableObject {
         assetTasks[item.id]?.cancel()
         assetTasks[item.id] = nil
         resumeData[item.id] = nil
-        update(item.id) { $0.state = .cancelled }
+        update(item.id) { $0.state = .cancelled; $0.bytesPerSecond = nil }
     }
 
     func delete(_ item: DownloadItem, removeFile: Bool) {
@@ -163,6 +181,8 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         DispatchQueue.main.async {
             self.items.removeAll { $0.id == item.id }
+            self.cookiesByItem[item.id] = nil
+            self.progressMeta[item.id] = nil
             self.saveItems()
         }
     }
@@ -185,7 +205,10 @@ final class DownloadManager: NSObject, ObservableObject {
             task = session.downloadTask(withResumeData: resumeData)
         } else {
             var request = URLRequest(url: item.url)
-            request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+            request.setValue(browserUserAgent, forHTTPHeaderField: "User-Agent")
+            if let referer = item.referer {
+                request.setValue(referer, forHTTPHeaderField: "Referer")
+            }
             task = session.downloadTask(with: request)
         }
         task.taskDescription = item.id.uuidString
@@ -194,7 +217,10 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func startHLSFileWorker(for item: DownloadItem) {
-        let worker = HLSFileDownloader(sourceURL: item.url, outputFileName: item.fileName)
+        let worker = HLSFileDownloader(sourceURL: item.url,
+                                       outputFileName: item.fileName,
+                                       referer: item.referer,
+                                       cookies: cookiesByItem[item.id] ?? [])
         worker.onProgress = { [weak self] fraction, bytes in
             self?.throttledProgressUpdate(item.id, progress: fraction, received: bytes, total: 0)
         }
@@ -202,11 +228,13 @@ final class DownloadManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.hlsWorkers[item.id] = nil
+                self.progressMeta[item.id] = nil
                 switch result {
                 case .success(let fileURL):
                     self.update(item.id) {
                         $0.state = .finished
                         $0.progress = 1
+                        $0.bytesPerSecond = nil
                         $0.fileName = fileURL.lastPathComponent
                         $0.localRelativePath = fileURL.lastPathComponent
                         if let size = try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64 {
@@ -217,7 +245,11 @@ final class DownloadManager: NSObject, ObservableObject {
                     self.notify("Finished: \(fileURL.lastPathComponent)")
                 case .failure(let error):
                     if (error as? HLSError) == .cancelled { return }
-                    self.update(item.id) { $0.state = .failed; $0.errorMessage = error.localizedDescription }
+                    self.update(item.id) {
+                        $0.state = .failed
+                        $0.bytesPerSecond = nil
+                        $0.errorMessage = error.localizedDescription
+                    }
                 }
             }
         }
@@ -226,7 +258,16 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func startAssetTask(for item: DownloadItem) {
-        let asset = AVURLAsset(url: item.url)
+        var options: [String: Any] = [:]
+        var headers: [String: String] = ["User-Agent": browserUserAgent]
+        if let referer = item.referer {
+            headers["Referer"] = referer
+        }
+        options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        if let cookies = cookiesByItem[item.id], !cookies.isEmpty {
+            options[AVURLAssetHTTPCookiesKey] = cookies
+        }
+        let asset = AVURLAsset(url: item.url, options: options)
         guard let task = assetSession.makeAssetDownloadTask(asset: asset,
                                                             assetTitle: item.fileName,
                                                             assetArtworkData: nil,
@@ -237,6 +278,22 @@ final class DownloadManager: NSObject, ObservableObject {
         task.taskDescription = item.id.uuidString
         assetTasks[item.id] = task
         task.resume()
+    }
+
+    /// When the system HLS downloader fails (some servers reject it even with headers),
+    /// retry the same stream once through the segment-based file exporter.
+    private func fallbackToFileExport(_ id: UUID) {
+        guard var item = items.first(where: { $0.id == id }), item.kind == .hlsAsset else { return }
+        item.kind = .hlsFile
+        update(id) {
+            $0.kind = .hlsFile
+            $0.state = .downloading
+            $0.progress = 0
+            $0.receivedBytes = 0
+            $0.errorMessage = nil
+        }
+        startHLSFileWorker(for: item)
+        notify("Retrying as video file download…")
     }
 
     private func reattachTasks() {
@@ -293,15 +350,27 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private func throttledProgressUpdate(_ id: UUID, progress: Double, received: Int64, total: Int64) {
         DispatchQueue.main.async {
+            let now = Date()
+            if let meta = self.progressMeta[id],
+               now.timeIntervalSince(meta.lastPublish) < 0.35, progress < 1 {
+                return
+            }
             guard let idx = self.items.firstIndex(where: { $0.id == id }) else { return }
             var item = self.items[idx]
+            if let meta = self.progressMeta[id] {
+                let dt = now.timeIntervalSince(meta.lastPublish)
+                if dt > 0, received > meta.lastBytes {
+                    item.bytesPerSecond = Int64(Double(received - meta.lastBytes) / dt)
+                }
+            }
+            self.progressMeta[id] = (now, received)
             item.state = .downloading
             item.progress = progress
             item.receivedBytes = received
             if total > 0 { item.totalBytes = total }
             self.items[idx] = item
-            if Date().timeIntervalSince(self.lastProgressSave) > 3 {
-                self.lastProgressSave = Date()
+            if now.timeIntervalSince(self.lastProgressSave) > 3 {
+                self.lastProgressSave = now
                 self.saveItems()
             }
         }
@@ -339,6 +408,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             update(id) {
                 $0.state = .finished
                 $0.progress = 1
+                $0.bytesPerSecond = nil
                 $0.fileName = destination.lastPathComponent
                 $0.localRelativePath = destination.lastPathComponent
             }
@@ -346,7 +416,10 @@ extension DownloadManager: URLSessionDownloadDelegate {
         } catch {
             update(id) { $0.state = .failed; $0.errorMessage = error.localizedDescription }
         }
-        DispatchQueue.main.async { self.tasks[id] = nil }
+        DispatchQueue.main.async {
+            self.tasks[id] = nil
+            self.progressMeta[id] = nil
+        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -364,13 +437,27 @@ extension DownloadManager: URLSessionDownloadDelegate {
         guard let error, let desc = task.taskDescription, let id = UUID(uuidString: desc) else { return }
         let nsError = error as NSError
         if nsError.code == NSURLErrorCancelled { return } // pause/cancel path already handled
+
+        if task is AVAssetDownloadTask {
+            // System HLS downloader failed — automatically retry as a file export.
+            DispatchQueue.main.async {
+                self.assetTasks[id] = nil
+                self.fallbackToFileExport(id)
+            }
+            return
+        }
+
         if let data = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
             DispatchQueue.main.async { self.resumeData[id] = data }
         }
-        update(id) { $0.state = .failed; $0.errorMessage = error.localizedDescription }
+        update(id) {
+            $0.state = .failed
+            $0.bytesPerSecond = nil
+            $0.errorMessage = error.localizedDescription
+        }
         DispatchQueue.main.async {
             self.tasks[id] = nil
-            self.assetTasks[id] = nil
+            self.progressMeta[id] = nil
         }
     }
 
@@ -394,8 +481,12 @@ extension DownloadManager: AVAssetDownloadDelegate {
             $0.localRelativePath = location.relativePath
             $0.state = .finished
             $0.progress = 1
+            $0.bytesPerSecond = nil
         }
-        DispatchQueue.main.async { self.assetTasks[id] = nil }
+        DispatchQueue.main.async {
+            self.assetTasks[id] = nil
+            self.progressMeta[id] = nil
+        }
         notify("Saved for offline playback")
     }
 

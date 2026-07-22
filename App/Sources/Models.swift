@@ -27,8 +27,12 @@ struct DownloadItem: Identifiable, Codable, Equatable {
     var pageTitle: String?
     var errorMessage: String?
     var createdAt: Date
+    /// Page the media was found on; sent as the Referer header (many CDNs require it).
+    var referer: String?
+    /// Rolling transfer speed, updated while downloading.
+    var bytesPerSecond: Int64?
 
-    init(url: URL, fileName: String, kind: DownloadKind, pageTitle: String? = nil) {
+    init(url: URL, fileName: String, kind: DownloadKind, pageTitle: String? = nil, referer: String? = nil) {
         self.id = UUID()
         self.url = url
         self.fileName = fileName
@@ -41,6 +45,8 @@ struct DownloadItem: Identifiable, Codable, Equatable {
         self.pageTitle = pageTitle
         self.errorMessage = nil
         self.createdAt = Date()
+        self.referer = referer
+        self.bytesPerSecond = nil
     }
 
     var isActive: Bool { state == .queued || state == .downloading || state == .paused }
@@ -52,6 +58,8 @@ struct DetectedMedia: Identifiable, Hashable {
     /// "hls", "dash", "video" or "audio"
     let kind: String
     let pageTitle: String
+    /// URL of the page the media was detected on (used as Referer for the download).
+    let pageURL: String?
 
     static func == (lhs: DetectedMedia, rhs: DetectedMedia) -> Bool { lhs.url == rhs.url }
     func hash(into hasher: inout Hasher) { hasher.combine(url) }
