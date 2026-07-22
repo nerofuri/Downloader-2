@@ -82,6 +82,9 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     @Published var showingNewTabPage = true
     @Published var desktopMode = false
 
+    /// Called when this tab's URL changes so the manager can persist the session.
+    var onSessionChange: (() -> Void)?
+
     private var observations: [NSKeyValueObservation] = []
 
     init(incognito: Bool = false) {
@@ -126,7 +129,10 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
             },
             webView.observe(\.url, options: [.new]) { [weak self] view, _ in
                 DispatchQueue.main.async {
-                    if let url = view.url { self?.urlString = url.absoluteString }
+                    if let url = view.url {
+                        self?.urlString = url.absoluteString
+                        self?.onSessionChange?()
+                    }
                 }
             },
             webView.observe(\.canGoBack, options: [.new]) { [weak self] view, _ in
@@ -309,18 +315,24 @@ final class TabManager: ObservableObject {
     @Published var tabs: [BrowserTab] = []
     @Published var activeTabID: UUID?
 
+    private let sessionKey = "tab.session.urls"
+    private let activeIndexKey = "tab.session.activeIndex"
+
     var activeTab: BrowserTab? { tabs.first { $0.id == activeTabID } }
 
     init() {
-        newTab()
+        restoreSession()
+        if tabs.isEmpty { newTab() }
     }
 
     @discardableResult
     func newTab(incognito: Bool = false, url: URL? = nil) -> BrowserTab {
         let tab = BrowserTab(incognito: incognito)
+        attach(tab)
         tabs.append(tab)
         activeTabID = tab.id
         if let url { tab.load(url) }
+        persistSession()
         return tab
     }
 
@@ -332,14 +344,47 @@ final class TabManager: ObservableObject {
         if tabs.isEmpty {
             newTab()
         }
+        persistSession()
     }
 
     func select(_ tab: BrowserTab) {
         activeTabID = tab.id
+        persistSession()
     }
 
     func setAdBlockEverywhere(_ enabled: Bool) {
         tabs.forEach { $0.setAdBlock(enabled) }
+    }
+
+    // MARK: - Session persistence (survives app restart)
+
+    private func attach(_ tab: BrowserTab) {
+        tab.onSessionChange = { [weak self] in self?.persistSession() }
+    }
+
+    /// Saves the URLs of all non-incognito tabs so the same pages reopen next launch.
+    func persistSession() {
+        let urls = tabs
+            .filter { !$0.isIncognito && !$0.urlString.isEmpty && $0.urlString.hasPrefix("http") }
+            .map { $0.urlString }
+        UserDefaults.standard.set(urls, forKey: sessionKey)
+        if let active = activeTab, let index = tabs.filter({ !$0.isIncognito }).firstIndex(where: { $0.id == active.id }) {
+            UserDefaults.standard.set(index, forKey: activeIndexKey)
+        }
+    }
+
+    private func restoreSession() {
+        let urls = UserDefaults.standard.stringArray(forKey: sessionKey) ?? []
+        guard !urls.isEmpty else { return }
+        for urlString in urls {
+            guard let url = URL(string: urlString) else { continue }
+            let tab = BrowserTab(incognito: false)
+            attach(tab)
+            tabs.append(tab)
+            tab.load(url)
+        }
+        let activeIndex = UserDefaults.standard.integer(forKey: activeIndexKey)
+        activeTabID = tabs.indices.contains(activeIndex) ? tabs[activeIndex].id : tabs.first?.id
     }
 }
 

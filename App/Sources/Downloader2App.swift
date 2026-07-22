@@ -24,6 +24,7 @@ struct Downloader2App: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var tabManager = TabManager()
     @StateObject private var downloads = DownloadManager.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -33,6 +34,11 @@ struct Downloader2App: App {
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
                 .background(Theme.bg)
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .background || phase == .inactive {
+                tabManager.persistSession()
+            }
         }
     }
 }

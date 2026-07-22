@@ -383,6 +383,9 @@ struct NewTabPage: View {
     @Binding var showSettings: Bool
     let menuItems: () -> AnyView
 
+    @State private var homeQuery = ""
+    @FocusState private var homeSearchFocused: Bool
+
     private let shortcuts: [(title: String, url: String, icon: String, color: Color)] = [
         ("Google", "https://www.google.com", "magnifyingglass", .blue),
         ("YouTube", "https://www.youtube.com", "play.rectangle.fill", .red),
@@ -410,6 +413,7 @@ struct NewTabPage: View {
                     searchBar
                     shortcutsCard
                     trendingCard
+                    NewsCard { url in tab.load(url) }
                 }
                 Spacer().frame(height: 20)
             }
@@ -417,7 +421,7 @@ struct NewTabPage: View {
         }
         .scrollDismissesKeyboard(.immediately)
         .background(Theme.bg)
-        .onTapGesture { omniboxFocused.wrappedValue = false }
+        .onTapGesture { homeSearchFocused = false }
     }
 
     private var header: some View {
@@ -464,22 +468,51 @@ struct NewTabPage: View {
     }
 
     private var searchBar: some View {
-        Button {
-            omniboxFocused.wrappedValue = true
-        } label: {
-            HStack(spacing: 10) {
+        HStack(spacing: 10) {
+            Button {
+                submitHomeSearch()
+            } label: {
                 Image(systemName: "magnifyingglass")
-                Text("Search")
-                Spacer()
-                Image(systemName: "mic.fill")
+                    .foregroundStyle(homeSearchFocused ? Theme.accent : Theme.textSecondary)
             }
-            .foregroundStyle(Theme.textSecondary)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 15)
-            .background(Theme.card, in: Capsule())
-            .overlay(Capsule().stroke(Theme.accentGradient, lineWidth: 1.3))
+            .buttonStyle(.plain)
+
+            TextField("", text: $homeQuery,
+                      prompt: Text("Search").foregroundColor(Theme.textSecondary))
+                .focused($homeSearchFocused)
+                .keyboardType(.webSearch)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.go)
+                .foregroundStyle(.white)
+                .onSubmit { submitHomeSearch() }
+
+            if !homeQuery.isEmpty {
+                Button { homeQuery = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Image(systemName: "mic.fill").foregroundStyle(Theme.textSecondary)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 15)
+        .background(Theme.card, in: Capsule())
+        .overlay(Capsule().stroke(homeSearchFocused
+                                  ? AnyShapeStyle(Theme.accentGradient)
+                                  : AnyShapeStyle(Theme.stroke), lineWidth: 1.3))
+    }
+
+    private func submitHomeSearch() {
+        let query = homeQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            homeSearchFocused = true
+            return
+        }
+        tab.submit(query)
+        homeQuery = ""
+        homeSearchFocused = false
     }
 
     private var shortcutsCard: some View {
@@ -589,6 +622,8 @@ struct NewTabPage: View {
                     .padding(.horizontal, 20)
             }
 
+            searchBar
+
             VStack(spacing: 0) {
                 incognitoRow(icon: "eye.slash", title: "Your activity won't be saved",
                              subtitle: "No history, cookies or form data saved")
@@ -603,10 +638,10 @@ struct NewTabPage: View {
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.stroke, lineWidth: 1))
 
             Button {
-                omniboxFocused.wrappedValue = true
+                submitHomeSearch()
             } label: {
                 HStack {
-                    Image(systemName: "plus")
+                    Image(systemName: "magnifyingglass")
                     Text("Start browsing")
                 }
                 .font(.subheadline.bold())

@@ -31,6 +31,10 @@ struct DownloadItem: Identifiable, Codable, Equatable {
     var referer: String?
     /// Rolling transfer speed, updated while downloading.
     var bytesPerSecond: Int64?
+    /// For HLS file downloads: segments already written, enabling resume after
+    /// a network drop or app restart.
+    var completedUnits: Int?
+    var tot
 
     init(url: URL, fileName: String, kind: DownloadKind, pageTitle: String? = nil, referer: String? = nil) {
         self.id = UUID()
@@ -74,6 +78,13 @@ enum AppDirs {
 
     static var downloads: URL {
         let dir = documents.appendingPathComponent("Downloads", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Hidden working area for in-progress HLS segment downloads.
+    static func hlsJobDir(_ id: UUID) -> URL {
+        let dir = downloads.appendingPathComponent(".hlsjobs/\(id.uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }

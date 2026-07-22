@@ -273,26 +273,24 @@ struct DownloadRow: View {
         }
     }
 
-    /// Right-hand detail: live speed + ETA while downloading, size otherwise.
+    /// Right-hand detail: size (known total or downloaded so far) plus live speed.
     private var detailText: String {
+        var parts: [String] = []
+
+        // Size component.
+        if item.state == .finished {
+            if item.receivedBytes > 0 { parts.append(formatBytes(item.receivedBytes)) }
+        } else if item.totalBytes > 0 {
+            parts.append("\(formatBytes(item.receivedBytes)) / \(formatBytes(item.totalBytes))")
+        } else if item.receivedBytes > 0 {
+            parts.append(formatBytes(item.receivedBytes))
+        }
+
+        // Speed component while active.
         if item.state == .downloading, let speed = item.bytesPerSecond, speed > 0 {
-            var text = "\(formatBytes(speed))/s"
-            if item.totalBytes > 0 {
-                let remaining = Double(item.totalBytes - item.receivedBytes) / Double(speed)
-                if remaining.isFinite, remaining > 0, remaining < 360000 {
-                    let mins = Int(remaining) / 60
-                    let secs = Int(remaining) % 60
-                    text += mins > 0 ? " · \(mins)m \(secs)s left" : " · \(secs)s left"
-                }
-            }
-            return text
+            parts.append("\(formatBytes(speed))/s")
         }
-        if item.receivedBytes > 0 {
-            return item.totalBytes > 0 && item.state != .finished
-                ? "\(formatBytes(item.receivedBytes)) / \(formatBytes(item.totalBytes))"
-                : formatBytes(item.receivedBytes)
-        }
-        return ""
+        return parts.joined(separator: " · ")
     }
 
     @ViewBuilder
