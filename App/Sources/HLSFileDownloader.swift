@@ -266,7 +266,8 @@ final class HLSFileDownloader {
     // MARK: - Crypto
 
     private static func aes128CBCDecrypt(data: Data, key: Data, iv: Data) throws -> Data {
-        var output = Data(count: data.count + kCCBlockSizeAES128)
+        let outputCapacity = data.count + kCCBlockSizeAES128
+        var output = Data(count: outputCapacity)
         var outputLength = 0
         let status = output.withUnsafeMutableBytes { outputBytes in
             data.withUnsafeBytes { dataBytes in
@@ -278,7 +279,7 @@ final class HLSFileDownloader {
                                 keyBytes.baseAddress, key.count,
                                 ivBytes.baseAddress,
                                 dataBytes.baseAddress, data.count,
-                                outputBytes.baseAddress, output.count,
+                                outputBytes.baseAddress, outputCapacity,
                                 &outputLength)
                     }
                 }
