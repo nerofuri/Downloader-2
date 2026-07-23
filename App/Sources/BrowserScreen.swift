@@ -313,6 +313,7 @@ struct BrowserScreen: View {
                     RoundedRectangle(cornerRadius: 12).fill(Theme.cardInner)
                 }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -333,6 +334,7 @@ struct BrowserScreen: View {
             .foregroundStyle(Theme.textSecondary)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 7)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

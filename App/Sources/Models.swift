@@ -78,13 +78,6 @@ enum AppDirs {
         return dir
     }
 
-    /// Hidden working area for in-progress HLS segment downloads.
-    static func hlsJobDir(_ id: UUID) -> URL {
-        let dir = downloads.appendingPathComponent(".hlsjobs/\(id.uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
     static func uniqueDestination(fileName: String) -> URL {
         let base = (fileName as NSString).deletingPathExtension
         let ext = (fileName as NSString).pathExtension
